@@ -4,14 +4,7 @@ seed.py
 
 Utility for making experiments deterministic and reproducible
 
-Deep learning training involves many sources of randomness:
-- Python's built-in random module
-- NumPy operations
-- PyTorch CPU ops (weight initialization, dropout, etc.)
-- PyTorch CUDA ops (GPU kernels)
-- cuDNN backend algorithms
-
-set_seed() fixes all relevant random number generators so that:
+Fixes all relevant random number generators so that:
 - model initialization is the same every run
 - data shuffling is consistent
 - augmentation randomness is reproducible

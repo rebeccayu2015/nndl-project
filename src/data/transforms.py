@@ -2,10 +2,8 @@
 transforms.py
 --------------
 
-Defines all image preprocessing and data augmentation pipelines used
+Defines all image preprocessing (i.e. normalization) and data augmentation pipelines used
 throughout the project
-
-These transforms serve two main purposes:
 
 1. Preprocessing
    - Convert raw PIL images into PyTorch tensors
@@ -18,8 +16,6 @@ These transforms serve two main purposes:
    - Small rotations
    - Random resized crops
    - Mild color jitter
-   These augmentations improve the model's robustness and ability to
-   generalize to distribution shifts, including unseen subclasses.
 
 Functions return torchvision `transforms.Compose` objects which can be
 passed directly into the Dataset class.
