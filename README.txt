@@ -1,1 +1,1 @@
-placeholder textgit
+data → transform → dataset → dataloader → model → loss → metrics
