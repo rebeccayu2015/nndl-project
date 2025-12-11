@@ -85,3 +85,29 @@ def plot_loss_curves(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     plt.savefig(save_path, dpi=200)
     plt.close(fig)
+
+def plot_accuracy_curves(
+    train_acc,
+    val_acc,
+    save_path: str,
+    title: str = "Training and validation accuracy",
+):
+    train_acc = np.asarray(train_acc, dtype=float)
+    val_acc = np.asarray(val_acc, dtype=float)
+
+    epochs = np.arange(1, len(train_acc) + 1)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(epochs, train_acc, label="Train accuracy")
+    ax.plot(epochs, val_acc, label="Val accuracy")
+
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Accuracy")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.savefig(save_path, dpi=200)
+    plt.close(fig)
