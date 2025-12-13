@@ -16,8 +16,10 @@ the custom Dataset class
 """
 
 import os
+import glob
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from torchvision.datasets import CIFAR100
 
 def create_splits(
     train_csv_path: str,
@@ -58,3 +60,73 @@ def create_splits(
     print(f"Saved train split to {train_path} ({len(new_train_df)} samples)")
     print(f"Saved val split to {val_path} ({len(val_df)} samples)")
     print(f"Saved calibration split to {calib_path} ({len(calib_df)} samples)")
+
+ANIMAL_FINE_LABELS = {
+    "beaver", "dolphin", "otter", "seal", "whale",
+
+    "rabbit", "hamster", "mouse", "shrew", "squirrel",
+
+    "camel", "cattle", "chimpanzee", "elephant", "kangaroo",
+
+    "bear", "lion", "tiger", "leopard",
+
+    "butterfly", "caterpillar", "cockroach",
+
+    "baby_chicken", "bird", "canary",
+
+    "crocodile", "dinosaur", "lizard", "snake", "turtle",
+}
+
+EXCLUDE_BIRD_REPTILE = {
+    "baby_chicken", "bird", "canary",
+    "crocodile", "dinosaur", "lizard", "snake", "turtle",
+}
+
+def export_cifar100(
+    out_dir="data/raw/farood_images",
+    train=False,
+    max_items=5000,
+    include_labels=ANIMAL_FINE_LABELS,
+    exclude_labels=EXCLUDE_BIRD_REPTILE,
+    clear_dir=True,
+):
+    os.makedirs(out_dir, exist_ok=True)
+
+    if clear_dir:
+        for f in glob.glob(os.path.join(out_dir, "*.jpg")):
+            os.remove(f)
+
+    ds = CIFAR100(root="./data", train=train, download=True)
+    classes = ds.classes
+
+    saved = 0
+    included_seen = set()
+    excluded_seen = set()
+
+    for i in range(len(ds)):
+        img, y = ds[i]
+        label_name = classes[y]
+
+        if label_name not in include_labels:
+            continue
+
+        if label_name in exclude_labels:
+            excluded_seen.add(label_name)
+            continue
+
+        included_seen.add(label_name)
+
+        img.save(
+            os.path.join(out_dir, f"{saved}.jpg"),
+            format="JPEG",
+            quality=95,
+            optimize=True,
+        )
+        saved += 1
+        if max_items is not None and saved >= max_items:
+            break
+
+    print(f"Saved {saved} animal-only (filtered) CIFAR-100 images to {out_dir}")
+    print("Included labels used:", sorted(included_seen))
+    print("Excluded labels encountered:", sorted(excluded_seen))
+

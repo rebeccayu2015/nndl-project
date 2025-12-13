@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torchvision.models as models
+import clip
 
 def build_backbone(name: str, pretrained: bool = True):
 
@@ -31,6 +32,12 @@ def build_backbone(name: str, pretrained: bool = True):
         feat_dim = model.classifier[1].in_features
         model.classifier = nn.Identity()
         return model, feat_dim
+    
+    elif name == "clip_b32":
+        clip_model, _ = clip.load("ViT-B/32", device="cpu")
+        visual = clip_model.visual
+        feat_dim = visual.output_dim  # 512
+        return visual, feat_dim
 
     else:
         raise ValueError(f"Unsupported backbone: {name}")

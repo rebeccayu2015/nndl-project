@@ -25,7 +25,7 @@ class DualHeadNet(nn.Module):
         num_super: int = 4,
         num_sub: int = 88,
         pretrained: bool = True,
-        freeze_backbone: bool = False,
+        freeze_backbone: bool = True,
         
     ):
         super().__init__()
@@ -40,7 +40,7 @@ class DualHeadNet(nn.Module):
         self.super_head = nn.Linear(feat_dim, num_super)
         self.sub_head   = nn.Linear(feat_dim, num_sub)
 
-        # Optional freezing for transfer learning phase 1
+        # freeze backbone parameters
         if freeze_backbone:
             for p in self.backbone.parameters():
                 p.requires_grad = False
