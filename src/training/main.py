@@ -2,6 +2,10 @@ import argparse
 import json
 from pathlib import Path
 import torch
+import os
+from datetime import datetime
+from typing import Any, Dict
+from torch.utils.data import DataLoader, ConcatDataset
 
 from src.training.configs import TrainingConfig
 from src.training.trainer import (
@@ -12,9 +16,12 @@ from src.training.trainer import (
     Trainer,
     EarlyStopper,
 )
-from src.utils.logging import save_metrics
 from src.utils.seed import set_seed
 
+
+# -------------------------------------------------------------
+# Argument parser
+# -------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Training entrypoint")
 
@@ -37,29 +44,129 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda_sub", type=float, default=1.0)
 
     parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--num_epochs", type=int, default=20) 
-    parser.add_argument("--epochs_finetune", type=int, default=5)
+    parser.add_argument("--num_epochs", type=int, default=15)
+    parser.add_argument("--epochs_finetune", type=int, default=10)
     parser.add_argument("--patience", type=int, default=3)
 
     parser.add_argument("--fine_tune", action="store_true", default=True)
     parser.add_argument("--no_fine_tune", action="store_false", dest="fine_tune")
 
     parser.add_argument("--optimizer", choices=["adam", "adamw", "sgd"], default="adamw")
-    parser.add_argument("--optimizer_finetune", choices=["adam", "adamw", "sgd"], default="adamw")
+    parser.add_argument(
+        "--optimizer_finetune", choices=["adam", "adamw", "sgd"], default="adamw"
+    )
+
     parser.add_argument("--scheduler", choices=["cosine", "none"], default="cosine")
-    parser.add_argument("--scheduler_finetune", choices=["cosine", "none"], default="cosine")
+    parser.add_argument(
+        "--scheduler_finetune", choices=["cosine", "none"], default="cosine"
+    )
+
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_finetune", type=float, default=1e-5)
 
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--save_dir", default="checkpoints")
     parser.add_argument("--seed", type=int, default=42)
+
+    parser.add_argument(
+        "--osr_only",
+        action="store_true",
+        help="Skip training and only run calibration + OSR using existing checkpoints",
+    )
 
     return parser
 
 
+# -------------------------------------------------------------
+# JSON helpers
+# -------------------------------------------------------------
+def _json_safe(obj: Any) -> Any:
+    try:
+        if isinstance(obj, torch.device):
+            return str(obj)
+    except Exception:
+        pass
+
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(x) for x in obj]
+
+    return str(obj)
+
+
+def _load_json(path: str) -> Dict[str, Any]:
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=False)
+    os.replace(tmp_path, path)
+
+
+# -------------------------------------------------------------
+# Run artifact initialization
+# -------------------------------------------------------------
+def init_run_artifact(args, save_dir: str = "checkpoints", suffix: str = "") -> None:
+    os.makedirs(save_dir, exist_ok=True)
+
+    mode = getattr(args, "mode", None) or "run"
+
+    if not hasattr(args, "run_id") or args.run_id is None:
+        args.run_id = f"{mode}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    name = f"{args.run_id}{suffix}_run.json"
+    args.run_path = os.path.join(save_dir, name)
+
+    hparams = _json_safe(
+        {k: v for k, v in vars(args).items() if k not in ("run_id", "run_path")}
+    )
+
+    existing = _load_json(args.run_path)
+
+    base = {
+        "run_id": args.run_id,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "model": mode,
+        "hyperparameters": hparams,
+        "training": {"epochs": []},
+        "osr": None,
+    }
+
+    if existing:
+        existing.setdefault("run_id", base["run_id"])
+        existing.setdefault("timestamp", base["timestamp"])
+        existing.setdefault("model", base["model"])
+        existing["hyperparameters"] = hparams
+        existing.setdefault("training", {}).setdefault("epochs", [])
+        existing.setdefault("osr", None)
+        payload = existing
+    else:
+        payload = base
+
+    _atomic_write_json(args.run_path, payload)
+
+
+# -------------------------------------------------------------
+# Main
+# -------------------------------------------------------------
 def main():
     args = build_parser().parse_args()
+
+    suffix = "_osr" if args.osr_only else ""
+    init_run_artifact(args, save_dir=args.save_dir, suffix=suffix)
+
+    print(f"[INFO] Run ID: {args.run_id}")
+    print(f"[INFO] Run JSON: {args.run_path}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)
@@ -90,28 +197,39 @@ def main():
         optimizer=args.optimizer,
         optimizer_finetune=args.optimizer_finetune,
         scheduler=None if args.scheduler == "none" else args.scheduler,
-        scheduler_finetune=None if args.scheduler_finetune == "none" else args.scheduler_finetune,
+        scheduler_finetune=None
+        if args.scheduler_finetune == "none"
+        else args.scheduler_finetune,
     )
 
-    # prepare dataloader 
+    save_dir = Path(cfg.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    best_head_path = save_dir / "best_head.pth"
+    best_ft_path = save_dir / "best_finetune.pth"
+
     print("building dataloaders...")
-    train_loader, val_loader, calib_loader, near_ood_loader, far_ood_loader = build_dataloaders(cfg)
-    
+    train_loader, val_loader, calib_loader, near_ood_loader, far_ood_loader = (
+        build_dataloaders(cfg)
+    )
+
     def collate_ignore_meta(batch):
         images, y_super, y_sub, _ = zip(*batch)
         return (
             torch.stack(images),
             torch.tensor(y_super),
             torch.tensor(y_sub),
-            None,   # meta dropped
+            None,
         )
-        
-    open_set_dataset = ConcatDataset([
-        val_loader.dataset,
-        near_ood_loader.dataset,
-        far_ood_loader.dataset,
-    ])
-    
+
+    open_set_dataset = ConcatDataset(
+        [
+            val_loader.dataset,
+            near_ood_loader.dataset,
+            far_ood_loader.dataset,
+        ]
+    )
+
     open_set_loader = DataLoader(
         open_set_dataset,
         batch_size=val_loader.batch_size,
@@ -126,50 +244,142 @@ def main():
     trainer = Trainer(
         model=model,
         criterion=torch.nn.CrossEntropyLoss(),
-        optimizer=None,  # set per phase
+        optimizer=None,
         train_loader=train_loader,
         val_loader=val_loader,
         device=device,
         lambda_sub=cfg.lambda_sub,
         patience=cfg.patience,
+        run_path=args.run_path,
     )
 
-    # Stage 1: baseline or frozen backbone head training
+    # ---------------- OSR-only ----------------
+    if args.osr_only:
+        print("[INFO] OSR-only mode: loading checkpoints and running calibration + OSR")
+
+        if not best_head_path.exists():
+            raise FileNotFoundError(f"Missing {best_head_path}")
+
+        state = torch.load(best_head_path, map_location=device)
+        model.load_state_dict(state)
+        model.eval()
+
+        trainer.calibrate(calib_loader, far_ood_loader)
+
+        prototypes_sub = trainer.compute_prototypes(calib_loader, level="sub")
+        prototypes_super = trainer.compute_prototypes(calib_loader, level="super")
+
+        proto_calib_sub = trainer.calibrate_prototype_threshold(
+            calib_loader, far_ood_loader, prototypes_sub
+        )
+        proto_calib_super = trainer.calibrate_prototype_threshold(
+            calib_loader, far_ood_loader, prototypes_super
+        )
+
+        if cfg.fine_tune:
+            if not best_ft_path.exists():
+                raise FileNotFoundError(f"Missing {best_ft_path}")
+            state = torch.load(best_ft_path, map_location=device)
+            model.load_state_dict(state)
+            model.eval()
+            trainer.calibrate(calib_loader, far_ood_loader)
+
+        metrics_conf = trainer.evaluate_open_set(open_set_loader)
+
+        metrics_proto = trainer.evaluate_open_set_prototype(
+            open_set_loader,
+            prototypes_sub,
+            prototypes_super,
+            proto_calib_sub["tau_prototype"],
+            proto_calib_super["tau_prototype"],
+        )
+
+        metrics_fused = trainer.evaluate_open_set_fused(
+            open_set_loader,
+            prototypes_super,
+            prototypes_sub,
+        )
+
+        payload = _load_json(args.run_path)
+        payload["osr"] = {
+            "confidence": metrics_conf,
+            "prototype_cosine": metrics_proto,
+            "fused": {
+                "metrics": metrics_fused,
+            },
+        }
+
+        _atomic_write_json(args.run_path, payload)
+        print("[INFO] OSR-only done.")
+        return
+
+    # ---------------- Training ----------------
     print("Start Training...")
     trainer.optimizer = build_optimizer(cfg.optimizer, model.parameters(), cfg.lr)
     trainer.scheduler = build_scheduler(cfg.scheduler, trainer.optimizer, cfg.num_epochs)
-
     stopper = EarlyStopper(cfg.patience)
-    
-    save_dir = Path(cfg.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
-    best_head_path = save_dir / "best_head.pth"
 
-    trainer.fit(cfg.num_epochs, "Epoch", stopper,best_head_path)
+    trainer.fit(cfg.num_epochs, "Epoch", stopper, best_head_path)
     trainer.calibrate(calib_loader, far_ood_loader)
 
     if not cfg.fine_tune:
-        metrics = trainer.evaluate_open_set(open_set_loader)
-        save_metrics(save_dir / "metric_output.csv", cfg.mode, metrics)
+        metrics_conf = trainer.evaluate_open_set(open_set_loader)
+        payload = _load_json(args.run_path)
+        payload.setdefault("osr", {})["confidence"] = metrics_conf
+        _atomic_write_json(args.run_path, payload)
         return
 
-    # Stage 2: fine-tune backbone
     for p in model.backbone.parameters():
         p.requires_grad = True
 
-    trainer.optimizer = build_optimizer(cfg.optimizer_finetune, model.parameters(), cfg.lr_finetune)
-    trainer.scheduler = build_scheduler(cfg.scheduler_finetune, trainer.optimizer, cfg.epochs_finetune)
-
+    trainer.optimizer = build_optimizer(
+        cfg.optimizer_finetune, model.parameters(), cfg.lr_finetune
+    )
+    trainer.scheduler = build_scheduler(
+        cfg.scheduler_finetune, trainer.optimizer, cfg.epochs_finetune
+    )
     stopper = EarlyStopper(cfg.patience)
 
-    best_ft_path = save_dir / "best_finetune.pth"
-    
     print("Start Fine Tuning...")
     trainer.fit(cfg.epochs_finetune, "Tune", stopper, best_ft_path)
     trainer.calibrate(calib_loader, far_ood_loader)
-    
-    metrics = trainer.evaluate_open_set(open_set_loader)
-    save_metrics(save_dir / "metric_output.csv", cfg.mode, metrics)
+
+    metrics_conf = trainer.evaluate_open_set(open_set_loader)
+
+    prototypes_sub = trainer.compute_prototypes(calib_loader, level="sub")
+    prototypes_super = trainer.compute_prototypes(calib_loader, level="super")
+
+    proto_calib_sub = trainer.calibrate_prototype_threshold(
+        calib_loader, far_ood_loader, prototypes_sub
+    )
+    proto_calib_super = trainer.calibrate_prototype_threshold(
+        calib_loader, far_ood_loader, prototypes_super
+    )
+
+    metrics_proto = trainer.evaluate_open_set_prototype(
+        open_set_loader,
+        prototypes_sub,
+        prototypes_super,
+        proto_calib_sub["tau_prototype"],
+        proto_calib_super["tau_prototype"],
+    )
+
+    metrics_fused = trainer.evaluate_open_set_fused(
+        open_set_loader,
+        prototypes_super,
+        prototypes_sub,
+    )
+
+    payload = _load_json(args.run_path)
+    payload.setdefault("osr", {})
+    payload["osr"]["confidence"] = metrics_conf
+    payload["osr"]["prototype_cosine"] = metrics_proto
+    payload["osr"]["fused"] = {
+        "metrics": metrics_fused,
+    }
+
+    _atomic_write_json(args.run_path, payload)
+
 
 if __name__ == "__main__":
     main()

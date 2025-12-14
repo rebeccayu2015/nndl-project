@@ -45,9 +45,17 @@ class DualHeadNet(nn.Module):
             for p in self.backbone.parameters():
                 p.requires_grad = False
 
+    def extract_features(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Returns backbone feature vectors (before classifier heads).
+        Shape: (B, D)
+        """
+        feats = self.backbone(x)
+        feats = torch.flatten(feats, 1)
+        return feats
+
     def forward(self, x):
-        feats = self.backbone(x)           # (B, 2048, 1, 1)
-        feats = torch.flatten(feats, 1)    # (B, 2048)
+        feats = self.extract_features(x)
         # print("BACKBONE OUTPUT SHAPE:", feats.shape)
         logits_super = self.super_head(feats)
         logits_sub   = self.sub_head(feats)
